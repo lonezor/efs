@@ -67,12 +67,13 @@ class CryptoCommandTests(unittest.TestCase):
             efs.format_luks(container)
         command = run.call_args.args[0]
         self.assertIn("argon2id", command)
+        self.assertIn("1MiB", command)
         self.assertIn("--verify-passphrase", command)
         self.assertEqual(run.call_args.kwargs["root"], True)
 
 
 class CreateTests(unittest.TestCase):
-    def args(self, destination: Path, size: int = 64):
+    def args(self, destination: Path, size: int = 8):
         return argparse.Namespace(container=str(destination), size_mib=size)
 
     @mock.patch.object(efs, "require")
@@ -114,8 +115,8 @@ class CreateTests(unittest.TestCase):
     def test_rejects_too_small_container_before_creating_a_file(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / "private.efs"
-            with self.assertRaisesRegex(efs.EfsError, "at least 64"):
-                efs.create(self.args(destination, 63))
+            with self.assertRaisesRegex(efs.EfsError, "at least 8"):
+                efs.create(self.args(destination, 7))
             self.assertFalse(destination.exists())
 
 
@@ -151,7 +152,7 @@ class GrowTests(unittest.TestCase):
             container = Path(directory) / "private.efs"
             with container.open("wb") as output:
                 output.truncate(128 * 1024 * 1024)
-            args = argparse.Namespace(container=str(container), size_mib=64)
+            args = argparse.Namespace(container=str(container), size_mib=8)
             with self.assertRaisesRegex(efs.EfsError, "shrinking is not supported"):
                 efs.grow(args)
 

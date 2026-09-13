@@ -20,10 +20,10 @@ sudo apt install cryptsetup e2fsprogs util-linux
 
 ## Use
 
-Create a 1 GiB container:
+Create a small 8 MiB container:
 
 ```sh
-./efs.py create private.efs 1024
+./efs.py create private.efs 8
 ```
 
 `private.efs` is a relative path, so this creates the file in the current
@@ -35,18 +35,21 @@ To choose another location, provide an absolute path:
 ./efs.py create /media/lonezor/USB/private.efs 1024
 ```
 
-The number `1024` is the container's total size in MiB.
+The number is the container's total size in MiB. Eight MiB is the minimum; the
+LUKS2 header uses about 2 MiB, leaving the remainder for ext4. Larger containers
+work in exactly the same way: use `1024` for 1 GiB.
 
-Open it at `private.efs.mnt`, or supply another mountpoint:
+Open it at a local mountpoint, or supply another mountpoint:
 
 ```sh
 ./efs.py open private.efs
 ./efs.py open private.efs /mnt/private
 ```
 
-When no mountpoint is supplied, the default mount directory is created beside
-the container. For `/media/lonezor/USB/private.efs`, that directory is
-`/media/lonezor/USB/private.efs.mnt`.
+When no mountpoint is supplied, the script creates `/mnt/efs-<LUKS UUID>`. This
+keeps the decrypted view away from USB and cloud-sync directories. The command
+prints the exact path after opening. An explicit mountpoint should likewise be
+outside any directory synchronized to cloud storage.
 
 Close it before copying, disconnecting its storage medium, or shutting down:
 

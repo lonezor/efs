@@ -18,9 +18,10 @@ import tempfile
 from typing import Iterator, NoReturn, Sequence
 
 
-MIN_SIZE_MIB = 64
+MIN_SIZE_MIB = 8
 MIGRATION_OVERHEAD_MIB = 32
 MAPPER_PREFIX = "efs-"
+KEYSLOTS_SIZE = "1MiB"
 UUID_RE = re.compile(r"^[0-9a-fA-F-]+$")
 
 
@@ -184,6 +185,8 @@ def format_luks(path: Path) -> None:
             "luks2",
             "--pbkdf",
             "argon2id",
+            "--luks2-keyslots-size",
+            KEYSLOTS_SIZE,
             "--verify-passphrase",
             str(path),
         ],
@@ -201,12 +204,20 @@ def owner_ids() -> tuple[int, int]:
     return uid, gid
 
 
-def prepare_mountpoint(mountpoint: Path) -> bool:
+def prepare_mountpoint(mountpoint: Path, *, allow_root_create: bool = False) -> bool:
     """Validate the mountpoint and return whether this call created it."""
     if mountpoint.is_symlink():
         fail(f"refusing symbolic-link mountpoint: {mountpoint}")
     if not mountpoint.exists():
-        mountpoint.mkdir(mode=0o700)
+        try:
+            mountpoint.mkdir(mode=0o700)
+        except PermissionError:
+            if not allow_root_create:
+                raise
+            require("chown", "mkdir")
+            run(["mkdir", "--mode", "0700", str(mountpoint)], root=True)
+            uid, gid = owner_ids()
+            run(["chown", f"{uid}:{gid}", str(mountpoint)], root=True)
         return True
     if not mountpoint.is_dir():
         fail(f"mountpoint is not a directory: {mountpoint}")
@@ -264,11 +275,15 @@ def create(args: argparse.Namespace) -> None:
 def open_container(args: argparse.Namespace) -> None:
     require("cryptsetup", "findmnt", "mount", "umount")
     container = existing_file(args.container)
-    mountpoint = Path(args.mountpoint or f"{container}.mnt").absolute()
+    name = mapping_name(container)
+    if args.mountpoint:
+        mountpoint = Path(args.mountpoint).absolute()
+        allow_root_create = False
+    else:
+        mountpoint = Path("/mnt") / name
+        allow_root_create = True
 
     created_mountpoint = False
-    name: str | None = None
-    name = mapping_name(container)
     mapper = mapper_path(name)
     with lock_container(container):
         try:
@@ -278,7 +293,9 @@ def open_container(args: argparse.Namespace) -> None:
                     fail(f"container is already open at {targets[0]}")
                 fail(f"container mapping is already open as {name}")
 
-            created_mountpoint = prepare_mountpoint(mountpoint)
+            created_mountpoint = prepare_mountpoint(
+                mountpoint, allow_root_create=allow_root_create
+            )
 
             try:
                 open_mapping(container, name)
