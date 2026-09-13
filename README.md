@@ -39,6 +39,10 @@ The number is the container's total size in MiB. Eight MiB is the minimum; the
 LUKS2 header uses about 2 MiB, leaving the remainder for ext4. Larger containers
 work in exactly the same way: use `1024` for 1 GiB.
 
+`cryptsetup` warns that the keyslots area is very small. This is expected. The
+compact 1 MiB area limits how many additional passphrases can be added later,
+but does not reduce the strength of the active passphrase or data encryption.
+
 Open it at a local mountpoint, or supply another mountpoint:
 
 ```sh
