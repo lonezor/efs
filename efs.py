@@ -22,6 +22,7 @@ MIN_SIZE_MIB = 8
 MIGRATION_OVERHEAD_MIB = 32
 MAPPER_PREFIX = "efs-"
 KEYSLOTS_SIZE = "1MiB"
+COMPACT_MAX_MIB = 64
 UUID_RE = re.compile(r"^[0-9a-fA-F-]+$")
 
 
@@ -174,24 +175,32 @@ def publish(temp: Path, destination: Path) -> None:
     os.rename(temp, destination)
 
 
+def run_to_file(args: Sequence[str], output: Path) -> None:
+    """Run a binary-producing command directly into a private file."""
+    with output.open("wb") as destination:
+        result = subprocess.run(args, check=False, stdout=destination)
+        destination.flush()
+        os.fsync(destination.fileno())
+    if result.returncode != 0:
+        rendered = " ".join(args[:2])
+        fail(f"{rendered} failed with exit status {result.returncode}")
+
+
 def format_luks(path: Path) -> None:
     print("Choose a passphrase for the new LUKS2 container.", file=sys.stderr)
-    run(
-        [
-            "cryptsetup",
-            "luksFormat",
-            "--batch-mode",
-            "--type",
-            "luks2",
-            "--pbkdf",
-            "argon2id",
-            "--luks2-keyslots-size",
-            KEYSLOTS_SIZE,
-            "--verify-passphrase",
-            str(path),
-        ],
-        root=True,
-    )
+    command = [
+        "cryptsetup",
+        "luksFormat",
+        "--batch-mode",
+        "--type",
+        "luks2",
+        "--pbkdf",
+        "argon2id",
+    ]
+    if path.stat().st_size <= COMPACT_MAX_MIB * 1024 * 1024:
+        command.extend(["--luks2-keyslots-size", KEYSLOTS_SIZE])
+    command.extend(["--verify-passphrase", str(path)])
+    run(command, root=True)
 
 
 def open_mapping(container: Path, name: str) -> None:
@@ -347,6 +356,91 @@ def status(args: argparse.Namespace) -> None:
         print(f"mapped but not mounted as {name}")
 
 
+def compression_format(requested: str) -> str:
+    """Select an installed compression format."""
+    if requested != "auto":
+        require(requested)
+        return requested
+    if shutil.which("zstd"):
+        return "zstd"
+    require("gzip")
+    return "gzip"
+
+
+def pack(args: argparse.Namespace) -> None:
+    """Compress a closed, small container for transport."""
+    require("cryptsetup", "findmnt")
+    container = existing_file(args.container)
+    size_mib = (container.stat().st_size + 1024 * 1024 - 1) // (1024 * 1024)
+    if size_mib > COMPACT_MAX_MIB and not args.force_large:
+        fail(
+            f"automatic packing is limited to {COMPACT_MAX_MIB} MiB; "
+            "use --force-large to override"
+        )
+
+    name = mapping_name(container)
+    codec = compression_format(args.format)
+    suffix = ".zst" if codec == "zstd" else ".gz"
+    archive = new_file_path(f"{container}{suffix}")
+    temp = create_temp_path(archive)
+    try:
+        with lock_container(container):
+            mapper = mapper_path(name)
+            if mapper.exists():
+                targets = mounted_targets(mapper)
+                if targets:
+                    fail(f"close the container before packing it; open at {targets[0]}")
+                fail(f"close the existing mapping before packing it: {name}")
+            if codec == "zstd":
+                run_to_file(
+                    ["zstd", "--quiet", "-T0", "-10", "-c", str(container)],
+                    temp,
+                )
+                run(["zstd", "--quiet", "--test", str(temp)])
+            else:
+                run_to_file(["gzip", "-9", "-c", str(container)], temp)
+                run(["gzip", "--test", str(temp)])
+            publish(temp, archive)
+            container.unlink()
+        print(f"Packed and verified: {archive}")
+        print(f"Removed source container after successful packing: {container}")
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
+def unpack(args: argparse.Namespace) -> None:
+    """Restore a packed container so it can be opened or grown."""
+    require("cryptsetup")
+    archive = existing_file(args.archive)
+    if archive.name.endswith(".zst"):
+        codec = "zstd"
+        container = Path(str(archive)[:-4])
+    elif archive.name.endswith(".gz"):
+        codec = "gzip"
+        container = Path(str(archive)[:-3])
+    else:
+        fail("archive name must end in .zst or .gz")
+    require(codec)
+    new_file_path(str(container))
+    temp = create_temp_path(container)
+    try:
+        with lock_container(archive):
+            if codec == "zstd":
+                run_to_file(["zstd", "--quiet", "-d", "-c", str(archive)], temp)
+            else:
+                run_to_file(["gzip", "-d", "-c", str(archive)], temp)
+            run(["cryptsetup", "isLuks", str(temp)])
+            luks_uuid(temp)
+            publish(temp, container)
+            archive.unlink()
+        print(f"Unpacked and verified: {container}")
+        print(f"Removed packed archive after successful unpacking: {archive}")
+    finally:
+        if temp.exists():
+            temp.unlink()
+
+
 def grow(args: argparse.Namespace) -> None:
     """Grow a closed container and its ext4 filesystem."""
     if args.size_mib < MIN_SIZE_MIB:
@@ -465,6 +559,26 @@ def parser() -> argparse.ArgumentParser:
     status_parser = commands.add_parser("status", help="show container state")
     status_parser.add_argument("container")
     status_parser.set_defaults(handler=status)
+
+    pack_parser = commands.add_parser(
+        "pack", help="compress a closed container for transport"
+    )
+    pack_parser.add_argument("container")
+    pack_parser.add_argument(
+        "--format", choices=("auto", "zstd", "gzip"), default="auto",
+        help="compression format (default: prefer zstd, then gzip)",
+    )
+    pack_parser.add_argument(
+        "--force-large", action="store_true",
+        help=f"allow packing containers larger than {COMPACT_MAX_MIB} MiB",
+    )
+    pack_parser.set_defaults(handler=pack)
+
+    unpack_parser = commands.add_parser(
+        "unpack", help="restore a packed container"
+    )
+    unpack_parser.add_argument("archive")
+    unpack_parser.set_defaults(handler=unpack)
 
     grow_parser = commands.add_parser(
         "grow", help="grow a closed container and its ext4 filesystem"

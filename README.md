@@ -10,12 +10,13 @@ second plaintext filesystem image is created.
 - Linux with device mapper support
 - Python 3.9 or newer
 - `cryptsetup`, `e2fsprogs`, and `util-linux`
+- `zstd` for compact transport archives (or `gzip` as a fallback)
 - root access through `sudo`, unless already running as root
 
 On Debian and Ubuntu, install the required system tools with:
 
 ```sh
-sudo apt install cryptsetup e2fsprogs util-linux
+sudo apt install cryptsetup e2fsprogs util-linux zstd
 ```
 
 ## Use
@@ -39,9 +40,11 @@ The number is the container's total size in MiB. Eight MiB is the minimum; the
 LUKS2 header uses about 2 MiB, leaving the remainder for ext4. Larger containers
 work in exactly the same way: use `1024` for 1 GiB.
 
-`cryptsetup` warns that the keyslots area is very small. This is expected. The
-compact 1 MiB area limits how many additional passphrases can be added later,
-but does not reduce the strength of the active passphrase or data encryption.
+For containers up to and including 64 MiB, `cryptsetup` warns that the keyslots
+area is very small. This is expected. The compact 1 MiB area makes these tiny
+containers practical, but limits how many additional passphrases can be added
+later. It does not reduce the strength of the active passphrase or data
+encryption. Containers larger than 64 MiB use cryptsetup's normal keyslot area.
 
 Open it at a local mountpoint, or supply another mountpoint:
 
@@ -66,6 +69,39 @@ Check whether it is open:
 ```sh
 ./efs.py status private.efs
 ```
+
+## Packing small containers for transport
+
+A mostly empty encrypted container still contains large unwritten zero-filled
+regions, so it can compress well for email, cloud storage, and small removable
+media. Pack a closed container with:
+
+```sh
+./efs.py pack private.efs
+```
+
+The default chooses Zstandard when available and creates `private.efs.zst`;
+otherwise it creates `private.efs.gz`. The original `.efs` file is removed only
+after the archive passes the compressor's integrity check. The archive remains
+encrypted and can be copied like any other file.
+
+Restore it before opening or growing it:
+
+```sh
+./efs.py unpack private.efs.zst
+./efs.py open private.efs
+```
+
+`unpack` validates the restored file as LUKS before removing the archive. Packing
+is automatic only for containers up to 64 MiB. Larger files take longer and
+usually compress less as they fill with encrypted data; override the limit with
+`--force-large` if that tradeoff is worthwhile. Use `--format gzip` when the
+destination computer does not have Zstandard.
+
+Always close the container before packing it. A packed archive cannot be opened
+or grown directly: unpack it, make changes, close it, and pack it again. The
+archive's size may reveal roughly how much of the container has been written,
+although it does not reveal the stored content.
 
 Grow a closed container to a new total size of 2 GiB:
 
